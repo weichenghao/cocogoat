@@ -1,0 +1,95 @@
+name: Build Production
+on:
+  push:
+    branches:
+      - main
+jobs:
+  build:
+    env:
+      BUILD_TYPE: REL
+      SENTRY_URL: ${{ secrets.SENTRY_URL }}
+      SENTRY_KEY: ${{ secrets.SENTRY_KEY }}
+    runs-on: ubuntu-latest
+    name: Build
+    steps:
+      - uses: actions/checkout@v3
+      - name: Unpack git objects
+        run: |
+          mv .git/objects/pack .
+          git unpack-objects < pack/*.pack
+          rm -rf pack
+      - uses: actions/setup-node@v3
+        with:
+          node-version: 16
+      - uses: szenius/set-timezone@v1.1
+        with:
+          timezoneLinux: "Asia/Shanghai"
+          timezoneMacos: "Asia/Shanghai"
+          timezoneWindows: "China Standard Time"
+      - uses: pnpm/action-setup@v2
+      - name: Get pnpm store directory
+        id: pnpm-cache
+        run: |
+          echo "::set-output name=pnpm_cache_dir::$(pnpm store path)"
+      - uses: actions/cache@v3
+        name: Setup pnpm cache
+        with:
+          path: ${{ steps.pnpm-cache.outputs.pnpm_cache_dir }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
+      - name: Build
+        run: pnpm build
+      - name: Build Check
+        if: failure()
+        run: |
+          curl -X POST -H "Content-Type: application/json" -d '{"msg_type":"interactive","card":{"config":{"wide_screen_mode":false},"header":{"template":"red","title":{"content":"构建失败通知","tag":"plain_text"}},"elements":[{"tag":"div","text":{"content":"cocogoat-web构建失败，请检查错误信息","tag":"lark_md"}}]}}' ${{ secrets.FEISHU_WEBHOOK }}
+      - name: Upload Report
+        uses: actions/upload-artifact@v3
+        with:
+          name: cocogoat-web-report
+          path: dist/report.html
+      - name: Upload package
+        uses: actions/upload-artifact@v3
+        with:
+          name: cocogoat-web
+          path: dist/
+      - name: Remove unused files
+        run: | 
+          rm -rf dist/assets/*.wasm
+          rm -rf dist/assets/*.ort
+          rm -rf dist/index.html
+          rm -rf dist/report.html
+      - name: Keep index.json
+        run: mkdir distindex && mv dist/index.json ./distindex/index.json && cp distindex/index.json ./distindex/pre.json
+      - name: Check for A/B test
+        run: ((git log -1 --pretty=%B | grep -F '[ab]' >/dev/null 2>&1) && rm ./distindex/index.json) || echo "This build will be published FULLY!!"
+      - name: Deploy static files
+        uses: TencentCloud/cos-action@v1
+        with:
+          secret_id: ${{ secrets.COS_ID }}
+          secret_key: ${{ secrets.COS_KEY }}
+          cos_bucket: ${{ secrets.COS_BUCKET }}
+          cos_region: ${{ secrets.COS_REGION }}
+          local_path: dist
+          remote_path: /
+          clean: false
+      - name: Deploy Check
+        if: failure()
+        run: |
+          curl -X POST -H "Content-Type: application/json" -d '{"msg_type":"interactive","card":{"config":{"wide_screen_mode":false},"header":{"template":"red","title":{"content":"构建失败通知","tag":"plain_text"}},"elements":[{"tag":"div","text":{"content":"cocogoat-web构建成功但部署失败，请检查错误信息","tag":"lark_md"}}]}}' ${{ secrets.FEISHU_WEBHOOK }}
+      - name: Deploy index.json
+        uses: TencentCloud/cos-action@v1
+        with:
+          secret_id: ${{ secrets.COS_ID }}
+          secret_key: ${{ secrets.COS_KEY }}
+          cos_bucket: ${{ secrets.COS_BUCKET }}
+          cos_region: ${{ secrets.COS_REGION }}
+          local_path: distindex
+          remote_path: /
+          clean: false
+      - name: Notification
+        run: |
+          curl -X POST -H "Content-Type: application/json" -d '{"msg_type":"interactive","card":{"config":{"wide_screen_mode":false},"header":{"template":"turquoise","title":{"content":"构建成功通知","tag":"plain_text"}},"elements":[{"tag":"div","text":{"content":"cocogoat-web已构建并部署成功","tag":"lark_md"}}]}}' ${{ secrets.FEISHU_WEBHOOK }}
